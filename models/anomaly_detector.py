@@ -1,69 +1,41 @@
 import torch
 import torch.nn as nn
-from models.vit_backbone import ViTBackbone
+import timm
 
 
 class AnomalyDetector(nn.Module):
     """
-    Cabezal de clasificación que toma el ViT y decide si el frame CCTV contiene un patrón de riesgo.
+    Cabezal de clasificación multiclase utilizando Transfer Learning sobre un ViT pre-entrenado.
     """
 
-    def __init__(self, embed_dim=768, num_classes=1, **kwargs):
+    def __init__(self, num_classes=3, **kwargs):
         super().__init__()
-        # 1. Inicializamos el Backbone (el extractor de características visuales)
-        self.backbone = ViTBackbone(embed_dim=embed_dim, **kwargs)
 
-        # 2. Cabezal de clasificación: toma el resumen de la imagen (token [CLS])
-        # y lo comprime hasta obtener un solo valor numérico.
+        # 1. Descargamos un ViT "Tiny" (ligero y rápido) pre-entrenado con millones de imágenes
+        self.backbone = timm.create_model('vit_tiny_patch16_224', pretrained=True)
+
+        # 2. Extraemos la dimensión de salida del modelo base (usualmente 192 para la versión tiny)
+        embed_dim = self.backbone.head.in_features
+
+        # 3. Quitamos el clasificador original de 1000 clases que trae por defecto
+        self.backbone.head = nn.Identity()
+
+        # 4. Colocamos nuestro propio cabezal de Serenazgo (3 clases)
         self.classifier = nn.Sequential(
             nn.Linear(embed_dim, 256),
             nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(256, num_classes),
-            nn.Sigmoid()  # Función Sigmoide para forzar la salida a un porcentaje entre 0.0 y 1.0
+            nn.Linear(256, num_classes)
         )
 
     def forward(self, x, return_attention=False):
-        """
-        Entrada: Tensor de video -> (Batch, Canales, Alto, Ancho)
-        Salida: Probabilidad de anomalía [0, 1] y mapas de atención para explicabilidad.
-        """
-        # A. Procesamos los frames a través del Transformer
+        # El backbone extrae el contexto global de la imagen
+        features = self.backbone(x)
+
+        # Nuestro clasificador toma la decisión de Seguridad (Normal, Violencia, Arma)
+        anomaly_score = self.classifier(features)
+
+        # Mantenemos la estructura de retorno para compatibilidad con el resto del código
         if return_attention:
-            features, attn_maps = self.backbone(x, return_attention=True)
-        else:
-            features = self.backbone(x)
-            attn_maps = None
-
-        # B. Extraemos SOLO el token [CLS], que concentra el contexto global.
-        # Está ubicado en la dimensión 1, índice 0 -> features[:, 0, :]
-        cls_token = features[:, 0, :]
-
-        # C. Predicción de la anomalía
-        anomaly_score = self.classifier(cls_token)
-
-        if return_attention:
-            return anomaly_score, attn_maps
+            return anomaly_score, None
         return anomaly_score
-
-
-# ==========================================
-# Prueba del Detector de Anomalías Completo
-# ==========================================
-if __name__ == "__main__":
-    # Simulamos el monitoreo de 4 cámaras simultáneas
-    dummy_cctv_frames = torch.randn(4, 3, 224, 224)
-
-    # Instanciamos el modelo completo (ViT con profundidad 4 para que sea ligero en la prueba local)
-    detector = AnomalyDetector(depth=4)
-
-    # Ejecutamos la inferencia simulada
-    scores, attention_maps = detector(dummy_cctv_frames, return_attention=True)
-
-    print(f"Cámaras analizadas (Batch): {dummy_cctv_frames.shape[0]}")
-    print(f"\nProbabilidad de delito (Umbral típico > 0.75):")
-    for i, score in enumerate(scores):
-        print(f" - Cámara {i + 1}: {score.item():.2%}")
-
-    print(f"\n¿Mapas de atención listos para UI?: {'Sí' if attention_maps else 'No'}")
-    print(f"Formato de salida del score: {scores.shape} -> (Batch, Num_Clases)")
